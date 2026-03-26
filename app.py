@@ -1,48 +1,68 @@
 import streamlit as st
 import numpy as np
+import cv2
 import tensorflow as tf
-from PIL import Image, ImageOps
-import json
+import joblib
+from PIL import Image
 
-st.set_page_config(page_title="Handwritten Digits and Operators", layout="centered")
+st.set_page_config(page_title="Handwritten Digit & Operator Classifier", page_icon="✍️", layout="centered")
 
-st.title("Handwritten Digits and Operators Recognition")
-st.write("Upload an image to predict the handwritten digit/operator.")
+MODEL_PATH = "best_handwritten_operator_model.keras"
+LABEL_ENCODER_PATH = "label_encoder.pkl"
+IMG_SIZE = 28
 
 @st.cache_resource
-def load_model():
-    return tf.keras.models.load_model("handwritten_model.h5")
+def load_model_and_encoder():
+    model = tf.keras.models.load_model(MODEL_PATH)
+    label_encoder = joblib.load(LABEL_ENCODER_PATH)
+    return model, label_encoder
 
-@st.cache_data
-def load_label_map():
-    with open("label_map.json", "r") as f:
-        return json.load(f)
+model, label_encoder = load_model_and_encoder()
 
-model = load_model()
-label_map = load_label_map()
+def preprocess_uploaded_image(image, img_size=28):
+    image = np.array(image)
 
-uploaded_file = st.file_uploader("Upload image", type=["png", "jpg", "jpeg"])
+    if len(image.shape) == 3:
+        image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
-def preprocess_image(image):
-    image = image.convert("L")          # grayscale
-    image = ImageOps.invert(image)      # agar background white aur digit dark ho to useful
-    image = image.resize((28, 28))      # training size ke hisab se
-    img = np.array(image)
+    image = cv2.resize(image, (img_size, img_size), interpolation=cv2.INTER_NEAREST)
 
-    img = img.astype("float32") / 255.0
-    img = img.reshape(1, 28, 28, 1)
-    return img
+    # Invert if background is dark and digit is light
+    if np.mean(image) > 127:
+        image = 255 - image
+
+    _, image = cv2.threshold(image, 127, 255, cv2.THRESH_BINARY)
+
+    image = image.astype("float32") / 255.0
+    image = np.expand_dims(image, axis=-1)   # (28,28,1)
+    image = np.expand_dims(image, axis=0)    # (1,28,28,1)
+
+    return image
+
+st.title("✍️ Handwritten Digit & Operator Classifier")
+st.write("Upload a handwritten digit or operator image, and the model will predict the class.")
+
+uploaded_file = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
 
 if uploaded_file is not None:
-    image = Image.open(uploaded_file)
-    st.image(image, caption="Uploaded image", width=180)
+    image = Image.open(uploaded_file).convert("RGB")
+    st.image(image, caption="Uploaded Image", use_container_width=True)
 
-    x = preprocess_image(image)
-    pred = model.predict(x)
-    pred_idx = int(np.argmax(pred, axis=1)[0])
-    confidence = float(np.max(pred) * 100)
+    processed = preprocess_uploaded_image(image, IMG_SIZE)
 
-    predicted_label = label_map.get(str(pred_idx), str(pred_idx))
+    pred_probs = model.predict(processed)
+    pred_idx = np.argmax(pred_probs, axis=1)[0]
+    pred_label = label_encoder.inverse_transform([pred_idx])[0]
+    confidence = float(np.max(pred_probs)) * 100
 
-    st.subheader(f"Prediction: {predicted_label}")
-    st.write(f"Confidence: {confidence:.2f}%")
+    st.success(f"Prediction: {pred_label}")
+    st.info(f"Confidence: {confidence:.2f}%")
+
+    st.subheader("Prediction Probabilities")
+    probs_dict = {
+        label_encoder.inverse_transform([i])[0]: float(pred_probs[0][i]) * 100
+        for i in range(len(pred_probs[0]))
+    }
+
+    sorted_probs = dict(sorted(probs_dict.items(), key=lambda x: x[1], reverse=True))
+    st.bar_chart(sorted_probs)
